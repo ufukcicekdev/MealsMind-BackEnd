@@ -51,6 +51,9 @@ class UserProfile(models.Model):
     hometown = models.CharField(max_length=100, blank=True, default="")
     onboarding_completed = models.BooleanField(default=False)
     push_token = models.CharField(max_length=200, blank=True, default="")
+    expiry_notifications_enabled = models.BooleanField(default=True)
+    email_verified = models.BooleanField(default=False)
+    theme = models.CharField(max_length=10, default="light")
 
     class Meta:
         verbose_name = "User Profile"
@@ -76,7 +79,24 @@ class Ingredient(models.Model):
         on_delete=models.CASCADE,
         related_name="ingredients",
     )
+    class Category(models.TextChoices):
+        DAIRY = "dairy", "Dairy"
+        MEAT = "meat", "Meat"
+        VEGETABLE = "vegetable", "Vegetable"
+        FRUIT = "fruit", "Fruit"
+        GRAIN = "grain", "Grain"
+        BEVERAGE = "beverage", "Beverage"
+        CONDIMENT = "condiment", "Condiment"
+        SNACK = "snack", "Snack"
+        OTHER = "other", "Other"
+
     name = models.CharField(max_length=120)
+    quantity = models.CharField(max_length=50, blank=True, default="")
+    category = models.CharField(
+        max_length=20,
+        choices=Category.choices,
+        default=Category.OTHER,
+    )
     expiration_date = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -248,3 +268,107 @@ class Like(models.Model):
 
     def __str__(self):
         return f"{self.user.username} ❤ {self.recipe.title}"
+
+
+class ShoppingListItem(models.Model):
+    """User shopping list (often from recipe missing ingredients)."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="shopping_items",
+    )
+    name = models.CharField(max_length=120)
+    checked = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["checked", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "name"],
+                name="unique_shopping_item_per_user",
+            )
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class MealPlanEntry(models.Model):
+    """One meal slot on a given day."""
+
+    class MealSlot(models.TextChoices):
+        BREAKFAST = "breakfast", "Breakfast"
+        LUNCH = "lunch", "Lunch"
+        DINNER = "dinner", "Dinner"
+        SNACK = "snack", "Snack"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="meal_plan_entries",
+    )
+    date = models.DateField()
+    meal_slot = models.CharField(max_length=10, choices=MealSlot.choices)
+    recipe = models.ForeignKey(
+        Recipe,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="meal_plan_entries",
+    )
+    custom_title = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["date", "meal_slot"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "date", "meal_slot"],
+                name="unique_meal_slot_per_user_day",
+            )
+        ]
+
+    def __str__(self):
+        title = self.recipe.title if self.recipe else self.custom_title
+        return f"{self.date} {self.meal_slot}: {title}"
+
+
+class RecipeReport(models.Model):
+    """Community content moderation report."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        REVIEWED = "reviewed", "Reviewed"
+        DISMISSED = "dismissed", "Dismissed"
+
+    reporter = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="recipe_reports",
+    )
+    recipe = models.ForeignKey(
+        Recipe,
+        on_delete=models.CASCADE,
+        related_name="reports",
+    )
+    reason = models.TextField(max_length=500)
+    status = models.CharField(
+        max_length=10,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["reporter", "recipe"],
+                name="unique_report_per_user_recipe",
+            )
+        ]
+
+    def __str__(self):
+        return f"Report on {self.recipe_id} by {self.reporter_id}"

@@ -101,6 +101,7 @@ def check_expiring_ingredients():
     profiles = UserProfile.objects.filter(
         user_id__in=user_items.keys(),
         push_token__gt="",
+        expiry_notifications_enabled=True,
     )
     token_map = {p.user_id: (p.push_token, p.language) for p in profiles}
 

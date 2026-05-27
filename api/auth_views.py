@@ -58,8 +58,35 @@ def _build_token_response(user: User) -> dict:
             "equipment": profile.equipment,
             "hometown": profile.hometown,
             "onboarding_completed": profile.onboarding_completed,
+            "email_verified": profile.email_verified,
+            "expiry_notifications_enabled": profile.expiry_notifications_enabled,
+            "theme": profile.theme,
         },
     }
+
+
+def _send_verification_email(user: User) -> None:
+    code = _generate_code()
+    cache_key = f"email_verify:{user.email.lower()}"
+    cache.set(cache_key, {"code": code, "user_id": user.pk}, timeout=86400)
+    try:
+        send_mail(
+            subject="MealsMind — Verify your email",
+            message=f"Your email verification code is: {code}\n\nThis code expires in 24 hours.",
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[user.email],
+            html_message=(
+                '<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">'
+                '<h2 style="color:#059669;">MealsMind</h2>'
+                "<p>Your email verification code is:</p>"
+                f'<div style="font-size:32px;font-weight:800;letter-spacing:8px;text-align:center;'
+                f'padding:20px;background:#f3f4f6;border-radius:12px;">{code}</div>'
+                "</div>"
+            ),
+            fail_silently=True,
+        )
+    except Exception:
+        logger.exception("Failed to send verification email to %s", user.email)
 
 
 class RegisterView(APIView):
@@ -76,6 +103,7 @@ class RegisterView(APIView):
             email=ser.validated_data["email"],
             password=ser.validated_data["password"],
         )
+        _send_verification_email(user)
 
         return Response(
             _build_token_response(user),
@@ -330,6 +358,49 @@ class ResetPasswordView(APIView):
         cache.delete(cache_key)
 
         return Response({"detail": "Password has been reset successfully."})
+
+
+# ======================================================================== #
+#  Email verification
+# ======================================================================== #
+
+class VerifyEmailView(APIView):
+    """POST /api/auth/verify-email/ — body: { "code": "123456" }"""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        code = request.data.get("code", "").strip()
+        if not code:
+            return Response(
+                {"detail": "code is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        email = request.user.email.lower()
+        cached = cache.get(f"email_verify:{email}")
+        if not cached or cached.get("code") != code:
+            return Response(
+                {"detail": "Invalid or expired code."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        profile = UserProfile.objects.get(user=request.user)
+        profile.email_verified = True
+        profile.save(update_fields=["email_verified"])
+        cache.delete(f"email_verify:{email}")
+        return Response({"detail": "Email verified successfully."})
+
+
+class ResendVerificationView(APIView):
+    """POST /api/auth/resend-verification/"""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        profile = UserProfile.objects.get(user=request.user)
+        if profile.email_verified:
+            return Response({"detail": "Email is already verified."})
+        _send_verification_email(request.user)
+        return Response({"detail": "Verification code sent."})
 
 
 # ======================================================================== #

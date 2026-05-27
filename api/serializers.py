@@ -1,6 +1,16 @@
 from rest_framework import serializers
 
-from .models import Ingredient, Like, Recipe, RecipeCategory, SavedRecipe, UserProfile
+from .models import (
+    Ingredient,
+    Like,
+    MealPlanEntry,
+    Recipe,
+    RecipeCategory,
+    RecipeReport,
+    SavedRecipe,
+    ShoppingListItem,
+    UserProfile,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -27,8 +37,17 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "hometown",
             "onboarding_completed",
             "push_token",
+            "expiry_notifications_enabled",
+            "email_verified",
+            "theme",
         ]
-        read_only_fields = ["id", "is_premium", "subscription_status", "premium_until"]
+        read_only_fields = [
+            "id",
+            "is_premium",
+            "subscription_status",
+            "premium_until",
+            "email_verified",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +64,8 @@ class IngredientSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "name",
+            "quantity",
+            "category",
             "expiration_date",
             "is_expired_soon",
             "is_expired",
@@ -204,3 +225,34 @@ class LikeSerializer(serializers.ModelSerializer):
         model = Like
         fields = ["id", "user", "recipe", "created_at"]
         read_only_fields = ["id", "user", "created_at"]
+
+
+class ShoppingListItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShoppingListItem
+        fields = ["id", "name", "checked", "created_at"]
+        read_only_fields = ["id", "created_at"]
+
+
+class MealPlanEntrySerializer(serializers.ModelSerializer):
+    recipe_title = serializers.CharField(source="recipe.title", read_only=True, default="")
+
+    class Meta:
+        model = MealPlanEntry
+        fields = [
+            "id",
+            "date",
+            "meal_slot",
+            "recipe",
+            "recipe_title",
+            "custom_title",
+            "created_at",
+        ]
+        read_only_fields = ["id", "created_at"]
+
+
+class RecipeReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RecipeReport
+        fields = ["id", "recipe", "reason", "status", "created_at"]
+        read_only_fields = ["id", "status", "created_at"]

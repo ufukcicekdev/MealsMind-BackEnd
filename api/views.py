@@ -16,15 +16,28 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Ingredient, Like, Recipe, RecipeCategory, SavedRecipe, UserProfile
+from .models import (
+    Ingredient,
+    Like,
+    MealPlanEntry,
+    Recipe,
+    RecipeCategory,
+    RecipeReport,
+    SavedRecipe,
+    ShoppingListItem,
+    UserProfile,
+)
 from .serializers import (
     CommunityShareSerializer,
     GenerateRecipeRequestSerializer,
     IngredientSerializer,
     LikeSerializer,
+    MealPlanEntrySerializer,
     RecipeCategorySerializer,
     RecipeFreeSerializer,
+    RecipeReportSerializer,
     RecipeSerializer,
+    ShoppingListItemSerializer,
     UserProfileSerializer,
 )
 
@@ -1045,3 +1058,126 @@ class RevenueCatWebhookView(APIView):
             logger.exception("RevenueCat webhook processing error")
 
         return Response({"ok": True})
+
+
+# ======================================================================== #
+#  Shopping list
+# ======================================================================== #
+
+class ShoppingListViewSet(viewsets.ModelViewSet):
+    serializer_class = ShoppingListItemSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return ShoppingListItem.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+class ShoppingListBulkAddView(APIView):
+    """POST /api/shopping/bulk/ — add multiple item names, skip duplicates."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        names = request.data.get("names", [])
+        if not isinstance(names, list):
+            return Response(
+                {"detail": "names must be a list of strings."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user = request.user
+        existing = set(
+            ShoppingListItem.objects.filter(user=user).values_list("name", flat=True)
+        )
+        created = []
+        for raw in names:
+            name = str(raw).strip()
+            if not name or name in existing:
+                continue
+            item = ShoppingListItem.objects.create(user=user, name=name)
+            existing.add(name)
+            created.append(item)
+        ser = ShoppingListItemSerializer(created, many=True)
+        return Response({"created": ser.data, "count": len(created)}, status=status.HTTP_201_CREATED)
+
+
+# ======================================================================== #
+#  Meal plan
+# ======================================================================== #
+
+class MealPlanListView(APIView):
+    """GET /api/meal-plan/?start=YYYY-MM-DD&end=YYYY-MM-DD"""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        start = request.query_params.get("start")
+        end = request.query_params.get("end")
+        qs = MealPlanEntry.objects.filter(user=request.user).select_related("recipe")
+        if start:
+            qs = qs.filter(date__gte=start)
+        if end:
+            qs = qs.filter(date__lte=end)
+        ser = MealPlanEntrySerializer(qs, many=True)
+        return Response(ser.data)
+
+
+class MealPlanEntryView(APIView):
+    """POST create / DELETE by id"""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        ser = MealPlanEntrySerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        entry = ser.save(user=request.user)
+        return Response(
+            MealPlanEntrySerializer(entry).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def delete(self, request, entry_id):
+        deleted, _ = MealPlanEntry.objects.filter(
+            user=request.user, pk=entry_id,
+        ).delete()
+        if not deleted:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# ======================================================================== #
+#  Community report
+# ======================================================================== #
+
+class RecipeReportView(APIView):
+    """POST /api/community/recipes/<id>/report/"""
+
+    permission_classes = [permissions.IsAuthenticated, IsPremiumUser]
+
+    def post(self, request, recipe_id):
+        recipe = Recipe.objects.filter(pk=recipe_id, is_public=True).first()
+        if not recipe:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        reason = (request.data.get("reason") or "").strip()
+        if len(reason) < 5:
+            return Response(
+                {"detail": "Please provide a reason (at least 5 characters)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        report, created = RecipeReport.objects.get_or_create(
+            reporter=request.user,
+            recipe=recipe,
+            defaults={"reason": reason},
+        )
+        if not created:
+            return Response(
+                {"detail": "You already reported this recipe."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(
+            RecipeReportSerializer(report).data,
+            status=status.HTTP_201_CREATED,
+        )
