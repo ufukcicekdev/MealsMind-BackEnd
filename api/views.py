@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import (
+    AIGenerationLog,
     Ingredient,
     Like,
     MealPlanEntry,
@@ -27,6 +28,7 @@ from .models import (
     ShoppingListItem,
     UserProfile,
 )
+from .recipe_ai_helpers import feedback_prompt_suffix, suggestion_from_raw
 from .serializers import (
     CommunityShareSerializer,
     GenerateRecipeRequestSerializer,
@@ -71,11 +73,14 @@ def _user_is_premium(user) -> bool:
 
 def _generation_count_today(user) -> int:
     start_of_day = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    return Recipe.objects.filter(
-        created_by=user,
-        is_ai_generated=True,
+    return AIGenerationLog.objects.filter(
+        user=user,
         created_at__gte=start_of_day,
-    ).count()
+    ).exclude(mode="meal_plan_fill").count()
+
+
+def _log_generation(user, mode: str = "standard") -> None:
+    AIGenerationLog.objects.create(user=user, mode=mode)
 
 
 def _pick_serializer_for_recipe(user):
@@ -152,7 +157,7 @@ class GenerateRecipeView(APIView):
     #  Gemini prompt builder
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _build_prompt(profile, ingredients_qs, equipment, extra_prompt):
+    def _build_prompt(profile, ingredients_qs, equipment, extra_prompt, mode="standard"):
         expiring_first = ingredients_qs.order_by("expiration_date")
         ingredient_names = [i.name for i in expiring_first]
 
@@ -181,18 +186,31 @@ class GenerateRecipeView(APIView):
             f"{ingredients_str}. "
             f"Available kitchen equipment: {equipment_str}. "
             f"Number of portions: {profile.default_portions}. "
-            "Generate a recipe that uses as many expiring ingredients as possible. "
-            "Return ONLY a raw JSON string — no markdown, no code fences "
-            "(```json), no explanation before or after. "
-            "The JSON MUST match this exact structure: "
-            '{"recipe_title": "", "prep_time_min": 0, "difficulty": "", '
-            '"calories_kcal": 0, '
-            '"macros": {"protein_g": 0, "carbs_g": 0, "fats_g": 0}, '
-            '"ingredients_used": [], "missing_ingredients": [], '
-            '"instructions": []}'
+            f"{feedback_prompt_suffix(profile)}"
         )
 
-        user_message = "Generate a recipe."
+        if mode == "quick":
+            system_instruction += (
+                " Generate exactly 1 recipe idea optimized for cooking today. "
+                "Return ONLY raw JSON: "
+                '{"recipes":[{"recipe_title":"","prep_time_min":0,"difficulty":"",'
+                '"calories_kcal":0,"macros":{"protein_g":0,"carbs_g":0,"fats_g":0},'
+                '"ingredients_used":[],"missing_ingredients":[],"instructions":[]}]}'
+            )
+            user_message = "What should I cook today?"
+        else:
+            system_instruction += (
+                " Generate exactly 3 DIFFERENT recipe ideas that use as many expiring "
+                "ingredients as possible. Each recipe must be distinct (different style "
+                "or main dish). "
+                "Return ONLY a raw JSON string — no markdown, no code fences. "
+                "Structure: "
+                '{"recipes":[{"recipe_title":"","prep_time_min":0,"difficulty":"",'
+                '"calories_kcal":0,"macros":{"protein_g":0,"carbs_g":0,"fats_g":0},'
+                '"ingredients_used":[],"missing_ingredients":[],"instructions":[]}]}'
+            )
+            user_message = "Generate 3 recipe ideas."
+
         if extra_prompt:
             user_message += f" Additional request: {extra_prompt}"
 
@@ -260,6 +278,7 @@ class GenerateRecipeView(APIView):
             data.get("recipe_title", ""), ingredients_used,
         )
 
+        servings = int(data.get("servings", 4))
         recipe = Recipe.objects.create(
             title=data.get("recipe_title", "Untitled"),
             prep_time_min=int(data.get("prep_time_min", 0)),
@@ -272,6 +291,7 @@ class GenerateRecipeView(APIView):
             ingredients_used=ingredients_used,
             missing_ingredients=missing_ingredients,
             instructions=data.get("instructions", []),
+            servings=servings,
             is_ai_generated=True,
             created_by=user,
         )
@@ -333,9 +353,10 @@ class GenerateRecipeView(APIView):
         ingredients_qs = Ingredient.objects.filter(user=request.user)
         equipment = payload_ser.validated_data.get("equipment", [])
         extra_prompt = payload_ser.validated_data.get("extra_prompt", "")
+        mode = payload_ser.validated_data.get("mode", "standard")
 
         system_instruction, user_message = self._build_prompt(
-            profile, ingredients_qs, equipment, extra_prompt,
+            profile, ingredients_qs, equipment, extra_prompt, mode,
         )
 
         try:
@@ -356,19 +377,87 @@ class GenerateRecipeView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        try:
-            recipe = self._save_recipe(request.user, ai_data)
-        except (TypeError, ValueError, KeyError):
-            logger.exception("Failed to persist AI recipe from data: %s", ai_data)
+        recipes_raw = ai_data.get("recipes")
+        if not isinstance(recipes_raw, list):
+            if ai_data.get("recipe_title"):
+                recipes_raw = [ai_data]
+            else:
+                return Response(
+                    {"error": "AI returned an invalid response. Please try again."},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+
+        limit = 1 if mode == "quick" else 3
+        suggestions = []
+        for item in recipes_raw[:limit]:
+            if isinstance(item, dict):
+                suggestions.append(suggestion_from_raw(item))
+
+        if not suggestions:
             return Response(
                 {"error": "AI returned an invalid response. Please try again."},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        _log_generation(request.user, mode)
+
+        return Response(
+            {
+                "suggestions": suggestions,
+                "count": len(suggestions),
+                "mode": mode,
+                "generations_used_today": _generation_count_today(request.user),
+                "generations_limit": (
+                    None if _user_is_premium(request.user) else FREE_DAILY_GENERATION_LIMIT
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class SaveGeneratedRecipeView(APIView):
+    """POST — persist one AI suggestion the user chose."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        data = request.data
+        if not data.get("recipe_title"):
+            return Response(
+                {"detail": "recipe_title is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        profile = _get_profile(request.user)
+        ai_shape = {
+            "recipe_title": data.get("recipe_title"),
+            "prep_time_min": data.get("prep_time_min", 0),
+            "difficulty": data.get("difficulty", "medium"),
+            "calories_kcal": data.get("calories_kcal", 0),
+            "macros": {
+                "protein_g": data.get("protein_g", 0),
+                "carbs_g": data.get("carbs_g", 0),
+                "fats_g": data.get("fats_g", 0),
+            },
+            "ingredients_used": data.get("ingredients_used", []),
+            "missing_ingredients": data.get("missing_ingredients", []),
+            "instructions": data.get("instructions", []),
+            "servings": int(data.get("servings", profile.default_portions)),
+        }
+
+        try:
+            recipe = GenerateRecipeView._save_recipe(request.user, ai_shape)
+        except (TypeError, ValueError, KeyError):
+            logger.exception("Failed to save generated recipe")
+            return Response(
+                {"error": "Could not save recipe."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if _user_is_premium(request.user):
-            image_url = self._generate_image(
+            image_url = GenerateRecipeView._generate_image(
                 recipe.title,
-                ai_data.get("ingredients_used", []),
+                ai_shape.get("ingredients_used", []),
                 profile.language,
             )
             if image_url:
@@ -377,9 +466,10 @@ class GenerateRecipeView(APIView):
 
         recipe.like_count = 0
         serializer_cls = _pick_serializer_for_recipe(request.user)
-        output = serializer_cls(recipe, context={"request": request}).data
-
-        return Response(output, status=status.HTTP_201_CREATED)
+        return Response(
+            serializer_cls(recipe, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 # ======================================================================== #

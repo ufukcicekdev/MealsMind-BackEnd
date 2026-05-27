@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import views
+from . import recipe_ai_views, views
 from .auth_views import (
     AppleAuthView,
     ChangePasswordView,
@@ -44,6 +44,21 @@ urlpatterns = [
     path("categories/", views.RecipeCategoryListView.as_view(), name="category-list"),
     # Recipes
     path("recipes/generate/", views.GenerateRecipeView.as_view(), name="generate-recipe"),
+    path(
+        "recipes/save-generated/",
+        views.SaveGeneratedRecipeView.as_view(),
+        name="save-generated-recipe",
+    ),
+    path(
+        "recipes/suggestion-feedback/",
+        recipe_ai_views.SuggestionFeedbackView.as_view(),
+        name="suggestion-feedback",
+    ),
+    path(
+        "recipes/<int:recipe_id>/scale/",
+        recipe_ai_views.RecipeScaleView.as_view(),
+        name="recipe-scale",
+    ),
     path("recipes/create-from-photo/", views.CreateRecipeFromPhotoView.as_view(), name="create-from-photo"),
     path("recipes/save-draft/", views.SaveDraftRecipeView.as_view(), name="save-draft"),
     path("recipes/saved/", views.MyRecipesView.as_view(), name="my-recipes"),
@@ -78,6 +93,16 @@ urlpatterns = [
         "meal-plan/entries/<int:entry_id>/",
         views.MealPlanEntryView.as_view(),
         name="meal-plan-delete",
+    ),
+    path(
+        "meal-plan/fill-ai/",
+        recipe_ai_views.FillMealPlanAIView.as_view(),
+        name="meal-plan-fill-ai",
+    ),
+    path(
+        "meal-plan/nutrition-summary/",
+        recipe_ai_views.MealPlanNutritionSummaryView.as_view(),
+        name="meal-plan-nutrition",
     ),
     # Webhooks
     path("webhooks/revenuecat/", views.RevenueCatWebhookView.as_view(), name="revenuecat-webhook"),

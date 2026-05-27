@@ -54,6 +54,7 @@ class UserProfile(models.Model):
     expiry_notifications_enabled = models.BooleanField(default=True)
     email_verified = models.BooleanField(default=False)
     theme = models.CharField(max_length=10, default="light")
+    ai_recipe_feedback = models.JSONField(default=dict, blank=True)
 
     class Meta:
         verbose_name = "User Profile"
@@ -189,6 +190,7 @@ class Recipe(models.Model):
         blank=True,
         related_name="recipes",
     )
+    servings = models.PositiveSmallIntegerField(default=4)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -199,6 +201,21 @@ class Recipe(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.get_difficulty_display()}, {self.prep_time_min} min)"
+
+
+class AIGenerationLog(models.Model):
+    """Tracks AI generate/quick calls for daily free-tier limits."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ai_generation_logs",
+    )
+    mode = models.CharField(max_length=20, default="standard")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
     @property
     def macro_summary(self):

@@ -109,6 +109,7 @@ _RECIPE_BASE_FIELDS = [
     "prep_time_min",
     "difficulty",
     "category",
+    "servings",
     "ingredients_used",
     "missing_ingredients",
     "instructions",
@@ -186,6 +187,12 @@ class GenerateRecipeRequestSerializer(serializers.Serializer):
         required=False,
         default="",
         help_text="Optional free-text hint for the AI",
+    )
+    mode = serializers.ChoiceField(
+        choices=["standard", "quick"],
+        required=False,
+        default="standard",
+        help_text="standard = 3 suggestions, quick = 1 suggestion for today",
     )
 
 
