@@ -28,7 +28,13 @@ from .models import (
     ShoppingListItem,
     UserProfile,
 )
-from .recipe_ai_helpers import feedback_prompt_suffix, suggestion_from_raw
+from .recipe_ai_helpers import (
+    feedback_prompt_suffix,
+    normalize_difficulty,
+    normalize_ingredient_list,
+    normalize_instructions,
+    suggestion_from_raw,
+)
 from .serializers import (
     CommunityShareSerializer,
     GenerateRecipeRequestSerializer,
@@ -186,6 +192,9 @@ class GenerateRecipeView(APIView):
             f"{ingredients_str}. "
             f"Available kitchen equipment: {equipment_str}. "
             f"Number of portions: {profile.default_portions}. "
+            "Use difficulty values: easy, medium, or hard only. "
+            "ingredients_used and missing_ingredients MUST be arrays of plain "
+            'strings (e.g. "2 domates", "1 soğan"), never JSON objects. '
             f"{feedback_prompt_suffix(profile)}"
         )
 
@@ -247,7 +256,8 @@ class GenerateRecipeView(APIView):
     @staticmethod
     def _guess_category(title, ingredients_used):
         """Best-effort category assignment based on title/ingredient keywords."""
-        text = (title + " " + " ".join(ingredients_used)).lower()
+        names = normalize_ingredient_list(ingredients_used)
+        text = (title + " " + " ".join(names)).lower()
         keyword_map = {
             "breakfast": ["kahvaltı", "breakfast", "omlet", "omelette", "egg", "yumurta", "pancake"],
             "soup": ["çorba", "soup"],
@@ -270,9 +280,12 @@ class GenerateRecipeView(APIView):
             "medium": Recipe.Difficulty.MEDIUM,
             "hard": Recipe.Difficulty.HARD,
         }
-        raw_difficulty = str(data.get("difficulty", "medium")).lower()
-        ingredients_used = data.get("ingredients_used", [])
-        missing_ingredients = data.get("missing_ingredients", [])
+        raw_difficulty = normalize_difficulty(data.get("difficulty", "medium"))
+        ingredients_used = normalize_ingredient_list(data.get("ingredients_used", []))
+        missing_ingredients = normalize_ingredient_list(
+            data.get("missing_ingredients", []),
+        )
+        instructions = normalize_instructions(data.get("instructions", []))
 
         category = GenerateRecipeView._guess_category(
             data.get("recipe_title", ""), ingredients_used,
@@ -290,7 +303,7 @@ class GenerateRecipeView(APIView):
             fats_g=int(data.get("macros", {}).get("fats_g", 0)),
             ingredients_used=ingredients_used,
             missing_ingredients=missing_ingredients,
-            instructions=data.get("instructions", []),
+            instructions=instructions,
             servings=servings,
             is_ai_generated=True,
             created_by=user,
@@ -432,22 +445,26 @@ class SaveGeneratedRecipeView(APIView):
         ai_shape = {
             "recipe_title": data.get("recipe_title"),
             "prep_time_min": data.get("prep_time_min", 0),
-            "difficulty": data.get("difficulty", "medium"),
+            "difficulty": normalize_difficulty(data.get("difficulty", "medium")),
             "calories_kcal": data.get("calories_kcal", 0),
             "macros": {
                 "protein_g": data.get("protein_g", 0),
                 "carbs_g": data.get("carbs_g", 0),
                 "fats_g": data.get("fats_g", 0),
             },
-            "ingredients_used": data.get("ingredients_used", []),
-            "missing_ingredients": data.get("missing_ingredients", []),
-            "instructions": data.get("instructions", []),
+            "ingredients_used": normalize_ingredient_list(
+                data.get("ingredients_used", []),
+            ),
+            "missing_ingredients": normalize_ingredient_list(
+                data.get("missing_ingredients", []),
+            ),
+            "instructions": normalize_instructions(data.get("instructions", [])),
             "servings": int(data.get("servings", profile.default_portions)),
         }
 
         try:
             recipe = GenerateRecipeView._save_recipe(request.user, ai_shape)
-        except (TypeError, ValueError, KeyError):
+        except Exception:
             logger.exception("Failed to save generated recipe")
             return Response(
                 {"error": "Could not save recipe."},

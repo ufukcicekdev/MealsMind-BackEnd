@@ -5,6 +5,72 @@ from typing import Any
 
 from .models import Recipe, UserProfile
 
+DIFFICULTY_ALIASES = {
+    "easy": "easy",
+    "kolay": "easy",
+    "medium": "medium",
+    "orta": "medium",
+    "moderate": "medium",
+    "hard": "hard",
+    "zor": "hard",
+    "difficult": "hard",
+}
+
+
+def normalize_difficulty(raw: Any) -> str:
+    key = str(raw or "medium").lower().strip()
+    return DIFFICULTY_ALIASES.get(key, "medium")
+
+
+def normalize_ingredient_item(item: Any) -> str:
+    if item is None:
+        return ""
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        name = str(
+            item.get("name")
+            or item.get("ingredient")
+            or item.get("item")
+            or item.get("title")
+            or "",
+        ).strip()
+        qty = str(
+            item.get("quantity")
+            or item.get("amount")
+            or item.get("qty")
+            or "",
+        ).strip()
+        if name and qty:
+            return f"{qty} {name}"
+        return name or qty
+    return str(item).strip()
+
+
+def normalize_ingredient_list(items: Any) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    out: list[str] = []
+    for item in items:
+        text = normalize_ingredient_item(item)
+        if text:
+            out.append(text)
+    return out
+
+
+def normalize_instructions(items: Any) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+        elif isinstance(item, dict):
+            step = item.get("step") or item.get("text") or item.get("instruction")
+            if step:
+                out.append(str(step).strip())
+    return out
+
 
 def feedback_prompt_suffix(profile: UserProfile) -> str:
     fb = profile.ai_recipe_feedback if isinstance(profile.ai_recipe_feedback, dict) else {}
@@ -47,14 +113,16 @@ def suggestion_from_raw(item: dict) -> dict:
     return {
         "recipe_title": item.get("recipe_title", "Untitled"),
         "prep_time_min": int(item.get("prep_time_min", 0)),
-        "difficulty": str(item.get("difficulty", "medium")).lower(),
+        "difficulty": normalize_difficulty(item.get("difficulty", "medium")),
         "calories_kcal": int(item.get("calories_kcal", 0)),
         "protein_g": int(macros.get("protein_g", 0)),
         "carbs_g": int(macros.get("carbs_g", 0)),
         "fats_g": int(macros.get("fats_g", 0)),
-        "ingredients_used": item.get("ingredients_used", []),
-        "missing_ingredients": item.get("missing_ingredients", []),
-        "instructions": item.get("instructions", []),
+        "ingredients_used": normalize_ingredient_list(item.get("ingredients_used", [])),
+        "missing_ingredients": normalize_ingredient_list(
+            item.get("missing_ingredients", []),
+        ),
+        "instructions": normalize_instructions(item.get("instructions", [])),
     }
 
 
