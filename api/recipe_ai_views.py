@@ -12,7 +12,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import AIGenerationLog, Ingredient, MealPlanEntry, Recipe
-from .recipe_ai_helpers import append_feedback, scale_recipe_fields
+from .recipe_ai_helpers import (
+    append_feedback,
+    normalize_difficulty,
+    scale_recipe_fields,
+)
 from .serializers import MealPlanEntrySerializer
 from .views import (
     FREE_DAILY_GENERATION_LIMIT,
@@ -196,8 +200,21 @@ class FillMealPlanAIView(APIView):
                 ),
             )
             raw = response.text.strip()
-            raw = re.sub(r"```(?:json)?", "", raw).strip()
-            data = json.loads(raw)
+            cleaned = re.sub(r"```(?:json)?", "", raw).strip()
+            try:
+                data = json.loads(cleaned)
+            except json.JSONDecodeError:
+                s, e = cleaned.find("{"), cleaned.rfind("}")
+                if s >= 0 and e > s:
+                    data = json.loads(cleaned[s : e + 1])
+                else:
+                    raise
+        except json.JSONDecodeError:
+            logger.exception("Meal plan fill AI returned invalid JSON")
+            return Response(
+                {"error": "AI returned an invalid response."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         except Exception:
             logger.exception("Meal plan fill AI failed")
             return Response(
@@ -205,7 +222,7 @@ class FillMealPlanAIView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        days_raw = data.get("days", [])
+        days_raw = data.get("days", []) if isinstance(data, dict) else []
         created_entries = []
         user = request.user
 
@@ -227,7 +244,9 @@ class FillMealPlanAIView(APIView):
             ai_shape = {
                 "recipe_title": recipe_data.get("recipe_title", "Meal"),
                 "prep_time_min": recipe_data.get("prep_time_min", 30),
-                "difficulty": recipe_data.get("difficulty", "medium"),
+                "difficulty": normalize_difficulty(
+                    recipe_data.get("difficulty", "medium"),
+                ),
                 "calories_kcal": recipe_data.get("calories_kcal", 0),
                 "macros": recipe_data.get("macros", {}),
                 "ingredients_used": recipe_data.get("ingredients_used", []),

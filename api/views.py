@@ -33,6 +33,7 @@ from .recipe_ai_helpers import (
     normalize_difficulty,
     normalize_ingredient_list,
     normalize_instructions,
+    parse_ai_recipes_payload,
     suggestion_from_raw,
 )
 from .serializers import (
@@ -246,9 +247,7 @@ class GenerateRecipeView(APIView):
     # ------------------------------------------------------------------ #
     @staticmethod
     def _parse_ai_response(raw_text):
-        cleaned = raw_text.strip()
-        cleaned = re.sub(r"```(?:json)?", "", cleaned).strip()
-        return json.loads(cleaned)
+        return parse_ai_recipes_payload(raw_text)
 
     # ------------------------------------------------------------------ #
     #  Persist recipe
@@ -372,23 +371,51 @@ class GenerateRecipeView(APIView):
             profile, ingredients_qs, equipment, extra_prompt, mode,
         )
 
-        try:
-            raw_text = self._call_gemini(system_instruction, user_message)
-        except Exception:
-            logger.exception("Gemini API call failed")
-            return Response(
-                {"error": "AI service is temporarily unavailable. Please try again."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        try:
-            ai_data = self._parse_ai_response(raw_text)
-        except (json.JSONDecodeError, ValueError, TypeError):
-            logger.error("Gemini returned unparseable JSON: %s", raw_text[:500])
-            return Response(
-                {"error": "AI returned an invalid response. Please try again."},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+        ai_data = None
+        raw_text = ""
+        for attempt in range(2):
+            try:
+                msg = user_message
+                if attempt > 0:
+                    msg += (
+                        " IMPORTANT: Return exactly one valid JSON object. "
+                        "The recipes array must contain only recipe objects, "
+                        "never bare ingredient strings."
+                    )
+                raw_text = self._call_gemini(system_instruction, msg)
+                ai_data = self._parse_ai_response(raw_text)
+                break
+            except Exception as exc:
+                if attempt == 0 and isinstance(exc, json.JSONDecodeError):
+                    logger.warning(
+                        "Gemini JSON parse failed (retrying): %s",
+                        raw_text[:500],
+                    )
+                    continue
+                if isinstance(exc, json.JSONDecodeError):
+                    logger.error(
+                        "Gemini returned unparseable JSON: %s",
+                        raw_text[:800],
+                    )
+                    return Response(
+                        {
+                            "error": (
+                                "AI returned an invalid response. "
+                                "Please try again."
+                            )
+                        },
+                        status=status.HTTP_502_BAD_GATEWAY,
+                    )
+                logger.exception("Gemini API call failed")
+                return Response(
+                    {
+                        "error": (
+                            "AI service is temporarily unavailable. "
+                            "Please try again."
+                        )
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
 
         recipes_raw = ai_data.get("recipes")
         if not isinstance(recipes_raw, list):
@@ -665,7 +692,7 @@ class MyRecipesView(generics.ListAPIView):
         cat = self.request.query_params.get("category")
         if cat:
             qs = qs.filter(category__slug=cat)
-        return qs
+        return qs.order_by("-created_at")
 
 
 # ======================================================================== #
