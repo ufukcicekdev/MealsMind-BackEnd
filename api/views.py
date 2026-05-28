@@ -1109,12 +1109,16 @@ class RevenueCatWebhookView(APIView):
         secret = getattr(settings, "REVENUECAT_WEBHOOK_SECRET", "")
         if not secret:
             return True
+        auth = request.headers.get("Authorization", "")
+        if auth == secret or auth == f"Bearer {secret}":
+            return True
         sig = request.headers.get("X-RevenueCat-Signature", "")
-        body = request.body
-        expected = hmac.new(
-            secret.encode(), body, hashlib.sha256
-        ).hexdigest()
-        return hmac.compare_digest(sig, expected)
+        if sig:
+            expected = hmac.new(
+                secret.encode(), request.body, hashlib.sha256
+            ).hexdigest()
+            return hmac.compare_digest(sig, expected)
+        return False
 
     def post(self, request):
         if not self._verify_signature(request):
@@ -1136,10 +1140,9 @@ class RevenueCatWebhookView(APIView):
             "PRODUCT_CHANGE",
             "UNCANCELLATION",
         }
+        # CANCELLATION = still active until period end; only EXPIRATION removes access.
         REVOKE_EVENTS = {
             "EXPIRATION",
-            "BILLING_ISSUE",
-            "CANCELLATION",
         }
 
         try:

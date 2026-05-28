@@ -8,12 +8,12 @@ import requests as http_requests
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.cache import cache
-from django.core.mail import send_mail
 from rest_framework import permissions, serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from .email_service import send_app_email
 from .models import UserProfile
 
 logger = logging.getLogger("api")
@@ -65,28 +65,42 @@ def _build_token_response(user: User) -> dict:
     }
 
 
-def _send_verification_email(user: User) -> None:
+def _send_verification_email(user: User) -> bool:
+    if not user.email:
+        return False
+    if not getattr(settings, "SMTP2GO_API_KEY", ""):
+        logger.error("SMTP2GO_API_KEY not configured — cannot send verification email")
+        return False
+
     code = _generate_code()
     cache_key = f"email_verify:{user.email.lower()}"
     cache.set(cache_key, {"code": code, "user_id": user.pk}, timeout=86400)
     try:
-        send_mail(
+        html = (
+            '<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">'
+            '<h2 style="color:#059669;">MealsMind</h2>'
+            "<p>Your email verification code is:</p>"
+            f'<div style="font-size:32px;font-weight:800;letter-spacing:8px;text-align:center;'
+            f'padding:20px;background:#f3f4f6;border-radius:12px;">{code}</div>'
+            "</div>"
+        )
+        return send_app_email(
+            to=[user.email],
             subject="MealsMind — Verify your email",
-            message=f"Your email verification code is: {code}\n\nThis code expires in 24 hours.",
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[user.email],
-            html_message=(
-                '<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">'
-                '<h2 style="color:#059669;">MealsMind</h2>'
-                "<p>Your email verification code is:</p>"
-                f'<div style="font-size:32px;font-weight:800;letter-spacing:8px;text-align:center;'
-                f'padding:20px;background:#f3f4f6;border-radius:12px;">{code}</div>'
-                "</div>"
-            ),
-            fail_silently=True,
+            text_body=f"Your email verification code is: {code}\n\nThis code expires in 24 hours.",
+            html_body=html,
         )
     except Exception:
         logger.exception("Failed to send verification email to %s", user.email)
+        return False
+
+
+def _mark_social_email_verified(user: User) -> None:
+    """Google/Apple already verify the user's email — skip manual verification."""
+    profile, _ = UserProfile.objects.get_or_create(user=user)
+    if not profile.email_verified:
+        profile.email_verified = True
+        profile.save(update_fields=["email_verified"])
 
 
 class RegisterView(APIView):
@@ -196,23 +210,21 @@ class ChangePasswordView(APIView):
         request.user.save()
 
         if request.user.email:
-            try:
-                send_mail(
-                    subject="MealsMind — Password Changed",
-                    message="Your MealsMind account password was changed. If you did not do this, please reset your password immediately.",
-                    from_email=settings.DEFAULT_FROM_EMAIL,
-                    recipient_list=[request.user.email],
-                    html_message=(
-                        '<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">'
-                        '<h2 style="color:#059669;">MealsMind</h2>'
-                        "<p>Your account password was changed successfully.</p>"
-                        '<p style="color:#6b7280;">If you did not make this change, please reset your password immediately.</p>'
-                        "</div>"
-                    ),
-                    fail_silently=True,
-                )
-            except Exception:
-                logger.exception("Failed to send password change notification")
+            send_app_email(
+                to=[request.user.email],
+                subject="MealsMind — Password Changed",
+                text_body=(
+                    "Your MealsMind account password was changed. "
+                    "If you did not do this, please reset your password immediately."
+                ),
+                html_body=(
+                    '<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">'
+                    '<h2 style="color:#059669;">MealsMind</h2>'
+                    "<p>Your account password was changed successfully.</p>"
+                    '<p style="color:#6b7280;">If you did not make this change, please reset your password immediately.</p>'
+                    "</div>"
+                ),
+            )
 
         return Response({"detail": "Password changed successfully."})
 
@@ -281,27 +293,27 @@ class ForgotPasswordView(APIView):
         cache_key = f"pwd_reset:{email}"
         cache.set(cache_key, {"code": code, "user_id": user.pk}, timeout=600)
 
-        try:
-            send_mail(
-                subject="MealsMind — Password Reset Code",
-                message=f"Your password reset code is: {code}\n\nThis code expires in 10 minutes.\n\nIf you did not request this, please ignore this email.",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
-                html_message=(
-                    f'<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">'
-                    f'<h2 style="color:#059669;">MealsMind</h2>'
-                    f'<p>Your password reset code is:</p>'
-                    f'<div style="font-size:32px;font-weight:800;letter-spacing:8px;color:#111827;'
-                    f'background:#f3f4f6;border-radius:12px;padding:20px;text-align:center;margin:20px 0;">'
-                    f'{code}</div>'
-                    f'<p style="color:#6b7280;">This code expires in 10 minutes.</p>'
-                    f'<p style="color:#9ca3af;font-size:13px;">If you did not request this, please ignore this email.</p>'
-                    f'</div>'
-                ),
-                fail_silently=False,
-            )
-        except Exception:
-            logger.exception("Failed to send password reset email to %s", email)
+        html = (
+            f'<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">'
+            f'<h2 style="color:#059669;">MealsMind</h2>'
+            f'<p>Your password reset code is:</p>'
+            f'<div style="font-size:32px;font-weight:800;letter-spacing:8px;color:#111827;'
+            f'background:#f3f4f6;border-radius:12px;padding:20px;text-align:center;margin:20px 0;">'
+            f'{code}</div>'
+            f'<p style="color:#6b7280;">This code expires in 10 minutes.</p>'
+            f'<p style="color:#9ca3af;font-size:13px;">If you did not request this, please ignore this email.</p>'
+            f'</div>'
+        )
+        if not send_app_email(
+            to=[email],
+            subject="MealsMind — Password Reset Code",
+            text_body=(
+                f"Your password reset code is: {code}\n\n"
+                "This code expires in 10 minutes.\n\n"
+                "If you did not request this, please ignore this email."
+            ),
+            html_body=html,
+        ):
             return Response(
                 {"detail": "Could not send email. Please try again later."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -399,7 +411,16 @@ class ResendVerificationView(APIView):
         profile = UserProfile.objects.get(user=request.user)
         if profile.email_verified:
             return Response({"detail": "Email is already verified."})
-        _send_verification_email(request.user)
+        if not request.user.email:
+            return Response(
+                {"detail": "No email address on this account."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not _send_verification_email(request.user):
+            return Response(
+                {"detail": "Could not send verification email. Please try again later."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response({"detail": "Verification code sent."})
 
 
@@ -472,8 +493,7 @@ class GoogleAuthView(APIView):
                 user.first_name = google_name[:30] if google_name else ""
                 user.save(update_fields=["first_name"])
 
-                profile, _ = UserProfile.objects.get_or_create(user=user)
-                profile.save()
+            _mark_social_email_verified(user)
 
             return Response(
                 _build_token_response(user),
@@ -595,8 +615,7 @@ class AppleAuthView(APIView):
                     user.first_name = full_name[:30]
                     user.save(update_fields=["first_name"])
 
-                profile, _ = UserProfile.objects.get_or_create(user=user)
-                profile.save()
+            _mark_social_email_verified(user)
 
             return Response(
                 _build_token_response(user),
